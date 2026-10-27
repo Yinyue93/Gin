@@ -193,6 +193,8 @@ private:
     void saveMidiFilePath();
     void restoreMidiFilePath();
     void showMidiMenu();
+    void showExportDialog();
+    void exportMidiFile (const juce::File& wavFile, bool normalize);
     void addToMidiMRU (const juce::File& file);
     juce::StringArray getMidiMRU();
 
@@ -211,12 +213,18 @@ private:
     StandaloneAudioProcessorPlayer& player;
 
     CopperLookAndFeel   lf;
+    juce::Component    content;
+    juce::Viewport     viewport;
 
     HeaderComponent     midiHeader { "Midi" };
     MidiFileComponent   midi { player.midiPlayer };
     SVGButton           midiPlay;
     SVGButton           midiStop;
     SVGButton           midiMenu;
+    SVGButton           midiExport;
+
+    class ExportJob;
+    std::unique_ptr<ExportJob> exportJob;
 
     HeaderComponent     sampleHeader { "Sample" };
     SampleFileComponent sample { player.samplePlayer };

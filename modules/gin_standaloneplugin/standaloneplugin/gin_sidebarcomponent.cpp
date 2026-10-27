@@ -7,8 +7,53 @@ namespace
     // Circle with T cutout (Triggered)
     const char* triggerSVG = R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM8 8h8v2h-3v7h-2v-7H8V8z" fill="currentColor"/></svg>)";
     // Circle with R cutout (Retrospective)
+    // Arrow down into a tray (Export)
+    const char* exportSVG = R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M11 4h2v8.6l3.3-3.3 1.4 1.4L12 16.4l-5.7-5.7 1.4-1.4 3.3 3.3V4zM5 18h14v2H5v-2z" fill="currentColor"/></svg>)";
     const char* retroSVG = R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16zM9 7h5a3 3 0 0 1 .5 5.96L17 17h-2.5l-2.3-4H11v4H9V7zm2 2v2h3a1 1 0 1 0 0-2h-3z" fill="currentColor"/></svg>)";
 }
+
+//==============================================================================
+// Renders the MIDI file on a thread, with a progress window
+class SideBarComponent::ExportJob : public juce::ThreadWithProgressWindow
+{
+public:
+    ExportJob (std::unique_ptr<juce::AudioProcessor> p, juce::File midi, juce::File wav,
+               double rate, MidiFileExporter::Options o, juce::Component* centre,
+               std::function<void (const MidiFileExporter::Result&)> done)
+        : juce::ThreadWithProgressWindow ("Exporting " + wav.getFileName(), true, true, 10000, {}, centre),
+          processor (std::move (p)), midiFile (std::move (midi)), wavFile (std::move (wav)),
+          sampleRate (rate), options (o), onDone (std::move (done))
+    {
+    }
+
+    void run() override
+    {
+        result = MidiFileExporter::render (*processor, midiFile, wavFile, sampleRate, options, [this] (double progress)
+        {
+            setProgress (progress);
+            return ! threadShouldExit();
+        });
+    }
+
+    void threadComplete (bool userPressedCancel) override
+    {
+        if (userPressedCancel)
+            result.cancelled = true;
+
+        if (onDone)
+            onDone (result);
+    }
+
+    const juce::File& getWavFile() const { return wavFile; }
+
+private:
+    std::unique_ptr<juce::AudioProcessor> processor;
+    juce::File midiFile, wavFile;
+    double sampleRate;
+    MidiFileExporter::Options options;
+    std::function<void (const MidiFileExporter::Result&)> onDone;
+    MidiFileExporter::Result result;
+};
 
 SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
   : filterWindow (f),
@@ -16,6 +61,7 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
     midiPlay ("play", playSVG, 4),
     midiStop ("stop", stopSVG, 4),
     midiMenu ("menu", menuSVG, 4),
+    midiExport ("export", exportSVG, 4),
     samplePlay ("play", playSVG, 4),
     sampleStop ("stop", stopSVG, 4),
     sampleMenu ("menu", menuSVG, 4),
@@ -69,6 +115,10 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
         midiMenu.setTooltip ("MIDI options");
         midiMenu.onClick = [this] { showMidiMenu(); };
         addAndMakeVisible (midiMenu);
+
+        midiExport.setTooltip ("Export MIDI file as WAV");
+        midiExport.onClick = [this] { showExportDialog(); };
+        addAndMakeVisible (midiExport);
 
         // Restore loop setting
         if (auto* props = filterWindow.pluginHolder->settings.get())
@@ -276,6 +326,14 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
 
     // Listen for audio device changes
     filterWindow.getDeviceManager().addChangeListener (this);
+
+    // Reparent the controls without changing their individual visibility.
+    while (getNumChildComponents() > 0)
+        content.addChildComponent (getChildComponent (0));
+
+    viewport.setViewedComponent (&content, false);
+    viewport.setScrollBarsShown (true, false);
+    addAndMakeVisible (viewport);
 }
 
 SideBarComponent::~SideBarComponent()
@@ -330,6 +388,144 @@ void SideBarComponent::updatePlayStopButtons()
     const bool isPlaying = player.midiPlayer.isPlaying();
     midiPlay.setEnabled (! isPlaying && player.midiPlayer.hasFileLoaded());
     midiStop.setEnabled (isPlaying || player.midiPlayer.getPlayheadPosition() > 0.0);
+    midiExport.setEnabled (player.midiPlayer.hasFileLoaded() && exportJob == nullptr);
+}
+
+void SideBarComponent::showExportDialog()
+{
+    if (! player.midiPlayer.hasFileLoaded() || exportJob != nullptr)
+        return;
+
+    auto* props = filterWindow.pluginHolder->settings.get();
+
+    auto normalize = std::make_shared<juce::ToggleButton> ("Normalize (peak at -1 dBTP)");
+    normalize->setToggleState (props != nullptr && props->getBoolValue ("midiExportNormalize", false), juce::dontSendNotification);
+    normalize->setSize (260, 24);
+
+    auto* window = new juce::AlertWindow ("Export WAV",
+                                          "Renders " + player.midiPlayer.getLoadedFile().getFileName()
+                                          + " with the current settings. It never goes over -1 dBTP: without normalize,"
+                                            " a render that would is turned down to fit.",
+                                          juce::MessageBoxIconType::NoIcon, this);
+    window->addCustomComponent (normalize.get());
+    window->addButton ("Export...", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    window->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+
+    // The window doesn't own the toggle: the callback keeps it alive
+    window->enterModalState (true, juce::ModalCallbackFunction::create ([safe = juce::Component::SafePointer<SideBarComponent> (this), normalize] (int button)
+    {
+        if (safe == nullptr || button != 1)
+            return;
+
+        const bool shouldNormalize = normalize->getToggleState();
+        auto* settings = safe->filterWindow.pluginHolder->settings.get();
+
+        if (settings != nullptr)
+            settings->setValue ("midiExportNormalize", shouldNormalize);
+
+        auto midiFile = safe->player.midiPlayer.getLoadedFile();
+        auto folder = juce::File (settings != nullptr ? settings->getValue ("midiExportFolder", "") : juce::String());
+        if (! folder.isDirectory())
+            folder = midiFile.getParentDirectory();
+
+        auto fc = std::make_shared<juce::FileChooser> ("Export WAV", folder.getChildFile (midiFile.getFileNameWithoutExtension() + ".wav"), "*.wav");
+        auto flags = juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
+                   | juce::FileBrowserComponent::warnAboutOverwriting;
+
+        fc->launchAsync (flags, [safe, fc, shouldNormalize] (const juce::FileChooser&)
+        {
+            auto file = fc->getResult();
+            if (safe == nullptr || file == juce::File())
+                return;
+
+            safe->exportMidiFile (file.withFileExtension (".wav"), shouldNormalize);
+        });
+    }), true);
+}
+
+void SideBarComponent::exportMidiFile (const juce::File& wavFile, bool normalize)
+{
+    if (exportJob != nullptr)
+        return;
+
+    auto* processor = filterWindow.pluginHolder->processor.get();
+
+    // A second instance with the current state renders the file, so the
+    // device keeps playing the first
+    std::unique_ptr<juce::AudioProcessor> copy (createPluginFilterOfType (juce::AudioProcessor::wrapperType_Standalone));
+    if (copy == nullptr)
+        return;
+
+    copy->setBusesLayout (processor->getBusesLayout());
+
+    juce::MemoryBlock state;
+    processor->getStateInformation (state);
+    copy->setStateInformation (state.getData(), int (state.getSize()));
+
+    if (auto* settings = filterWindow.pluginHolder->settings.get())
+        settings->setValue ("midiExportFolder", wavFile.getParentDirectory().getFullPathName());
+
+    auto rate = processor->getSampleRate();
+    if (rate <= 0.0)
+        rate = 48000.0;
+
+    MidiFileExporter::Options options;
+    options.normalize = normalize;
+
+    exportJob = std::make_unique<ExportJob> (std::move (copy), player.midiPlayer.getLoadedFile(), wavFile, rate, options,
+                                             getTopLevelComponent(),
+                                             [this, normalize, options] (const MidiFileExporter::Result& result)
+    {
+        const auto file = exportJob->getWavFile();
+
+        // Deleted once this callback has returned
+        juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<SideBarComponent> (this)]
+        {
+            if (safe != nullptr)
+            {
+                safe->exportJob.reset();
+                safe->updatePlayStopButtons();
+            }
+        });
+
+        if (result.cancelled)
+            return;
+
+        if (result.status.failed())
+        {
+            juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon, "Export failed",
+                                                    result.status.getErrorMessage(), {}, this);
+            return;
+        }
+
+        auto dB = [] (float gain) { return juce::String (juce::Decibels::gainToDecibels (gain, -150.0f), 1); };
+        auto totalSeconds = juce::roundToInt (result.seconds);
+
+        juce::String message;
+        message << "Wrote " << file.getFileName() << " (" << totalSeconds / 60 << ":"
+                << juce::String (totalSeconds % 60).paddedLeft ('0', 2) << ").\n\n";
+
+        if (result.renderedPeak <= 0.0f)
+            message << "The render is silent.";
+        else
+        {
+            if (result.gain > 1.0f)
+                message << "Normalized: raised " << dB (result.gain) << " dB. ";
+            else if (result.gain < 1.0f)
+                message << (normalize ? "Normalized: lowered " : "Lowered ") << dB (1.0f / result.gain) << " dB so it doesn't clip. ";
+
+            message << "Peak " << dB (result.getWrittenPeak()) << " dBTP.";
+        }
+
+        if (result.tailCut)
+            message << "\n\nIt was still sounding " << juce::String (options.maxTailSeconds, 0)
+                    << " s after the MIDI file ended, so it fades out there.";
+
+        juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::InfoIcon, "Export finished", message, {}, this);
+    });
+
+    updatePlayStopButtons();
+    exportJob->launchThread();
 }
 
 void SideBarComponent::saveMidiFilePath()
@@ -687,162 +883,56 @@ void SideBarComponent::paint (juce::Graphics& g)
 
 void SideBarComponent::resized()
 {
-    auto rc = getLocalBounds().reduced (2);
+    viewport.setBounds (getLocalBounds());
+    auto layout = SidebarLayout::create (getWidth(), midi.isVisible(), sample.isVisible(), xyScope.isVisible());
+    const int contentWidth = juce::jmax (0, getWidth() - (layout.height > getHeight() ? viewport.getScrollBarThickness() : 0));
+    layout = SidebarLayout::create (contentWidth, midi.isVisible(), sample.isVisible(), xyScope.isVisible());
+    content.setSize (contentWidth, juce::jmax (getHeight(), layout.height));
 
-    // Section heights
-    const int midiSectionHeight = 79;      // header (16) + gap (2) + component (35) + gap (2) + buttons (16) + gap (8)
-    const int sampleSectionHeight = 79;    // header (16) + gap (2) + component (35) + gap (2) + buttons (16) + gap (8)
-    const int recordSectionHeight = 79;    // buttons (16) + gap (2) + component (35) + gap (2) + header (16) + gap (8)
-    const int scopeSectionHeight = 126;    // component (100) + gap (2) + header (16) + gap (8)
-    const int spectrumSectionHeight = 126; // component (100) + gap (2) + header (16) + gap (8)
-    const int xySize = rc.getWidth();
-    const int xySectionHeight = xySize + 26; // component (square) + gap (2) + header (16) + gap (8)
-
-    if (midi.isVisible())
+    auto playerSection = [] (juce::Rectangle<int> rc, juce::Component& header, juce::Component& display,
+                             juce::Component& play, juce::Component& stop, juce::Component& menu,
+                             juce::Component* extra = nullptr)
     {
-        if (rc.getHeight() >= midiSectionHeight)
+        header.setBounds (rc.removeFromTop (16));
+        rc.removeFromTop (2);
+        display.setBounds (rc.removeFromTop (35));
+        rc.removeFromTop (2);
+        play.setBounds (rc.removeFromLeft (16));
+        rc.removeFromLeft (2);
+        stop.setBounds (rc.removeFromLeft (16));
+        rc.removeFromLeft (2);
+        menu.setBounds (rc.removeFromLeft (16));
+
+        if (extra != nullptr)
         {
-            midiHeader.setBounds (rc.removeFromTop (16));
-            rc.removeFromTop (2);
-
-            midi.setBounds (rc.removeFromTop (35));
-            rc.removeFromTop (2);
-
-            auto buttonArea = rc.removeFromTop (16);
-
-            midiPlay.setBounds (buttonArea.removeFromLeft (16));
-            buttonArea.removeFromLeft (2);
-            midiStop.setBounds (buttonArea.removeFromLeft (16));
-            buttonArea.removeFromLeft (2);
-            midiMenu.setBounds (buttonArea.removeFromLeft (16));
-
-            rc.removeFromTop (8);
+            rc.removeFromLeft (2);
+            extra->setBounds (rc.removeFromLeft (16));
         }
-        else
-        {
-            midiHeader.setBounds ({});
-            midi.setBounds ({});
-            midiPlay.setBounds ({});
-            midiStop.setBounds ({});
-            midiMenu.setBounds ({});
-        }
-    }
+    };
 
-    if (sample.isVisible())
+    playerSection (layout.midi, midiHeader, midi, midiPlay, midiStop, midiMenu, &midiExport);
+    playerSection (layout.sample, sampleHeader, sample, samplePlay, sampleStop, sampleMenu);
+
+    auto graphSection = [] (juce::Rectangle<int> rc, juce::Component& header, juce::Component& display)
     {
-        if (rc.getHeight() >= sampleSectionHeight)
-        {
-            sampleHeader.setBounds (rc.removeFromTop (16));
-            rc.removeFromTop (2);
+        header.setBounds (rc.removeFromTop (16));
+        rc.removeFromTop (2);
+        display.setBounds (rc);
+    };
 
-            sample.setBounds (rc.removeFromTop (35));
-            rc.removeFromTop (2);
+    graphSection (layout.spectrum, spectrumHeader, spectrum);
+    graphSection (layout.scope, scopeHeader, scope);
+    graphSection (layout.xy, xyHeader, xyScope);
+    graphSection (layout.output, outputHeader, outputGain);
 
-            auto buttonArea = rc.removeFromTop (16);
-
-            samplePlay.setBounds (buttonArea.removeFromLeft (16));
-            buttonArea.removeFromLeft (2);
-            sampleStop.setBounds (buttonArea.removeFromLeft (16));
-            buttonArea.removeFromLeft (2);
-            sampleMenu.setBounds (buttonArea.removeFromLeft (16));
-
-            rc.removeFromTop (8);
-        }
-        else
-        {
-            sampleHeader.setBounds ({});
-            sample.setBounds ({});
-            samplePlay.setBounds ({});
-            sampleStop.setBounds ({});
-            sampleMenu.setBounds ({});
-        }
-    }
-
-    const int outputSectionHeight = 46;    // slider (20) + gap (2) + header (16) + gap (8)
-
-    if (rc.getHeight() >= outputSectionHeight)
+    auto rc = layout.record;
+    recordHeader.setBounds (rc.removeFromTop (16));
+    rc.removeFromTop (2);
+    recordBuffer.setBounds (rc.removeFromTop (35));
+    rc.removeFromTop (2);
+    for (auto* button : { &recordNormal, &recordTriggered, &recordRetrospective, &recordStop, &recordMenu })
     {
-        outputGain.setBounds (rc.removeFromBottom (20));
-        rc.removeFromBottom (2);
-        outputHeader.setBounds (rc.removeFromBottom (16));
-        rc.removeFromBottom (8);
-    }
-    else
-    {
-        outputHeader.setBounds ({});
-        outputGain.setBounds ({});
-    }
-
-    if (rc.getHeight() >= recordSectionHeight)
-    {
-        auto buttonArea = rc.removeFromBottom (16);
-
-        recordNormal.setBounds (buttonArea.removeFromLeft (16));
-        buttonArea.removeFromLeft (2);
-        recordTriggered.setBounds (buttonArea.removeFromLeft (16));
-        buttonArea.removeFromLeft (2);
-        recordRetrospective.setBounds (buttonArea.removeFromLeft (16));
-        buttonArea.removeFromLeft (2);
-        recordStop.setBounds (buttonArea.removeFromLeft (16));
-        buttonArea.removeFromLeft (2);
-        recordMenu.setBounds (buttonArea.removeFromLeft (16));
-
-        rc.removeFromBottom (2);
-        recordBuffer.setBounds (rc.removeFromBottom (35));
-        rc.removeFromBottom (2);
-        recordHeader.setBounds (rc.removeFromBottom (16));
-        rc.removeFromBottom (8);
-    }
-    else
-    {
-        recordHeader.setBounds ({});
-        recordBuffer.setBounds ({});
-        recordNormal.setBounds ({});
-        recordTriggered.setBounds ({});
-        recordRetrospective.setBounds ({});
-        recordStop.setBounds ({});
-        recordMenu.setBounds ({});
-    }
-
-    if (rc.getHeight() >= scopeSectionHeight)
-    {
-        scope.setBounds (rc.removeFromBottom (100));
-        rc.removeFromBottom (2);
-        scopeHeader.setBounds (rc.removeFromBottom (16));
-        rc.removeFromBottom (8);
-    }
-    else
-    {
-        scopeHeader.setBounds ({});
-        scope.setBounds ({});
-    }
-
-    if (rc.getHeight() >= spectrumSectionHeight)
-    {
-        spectrum.setBounds (rc.removeFromBottom (100));
-        rc.removeFromBottom (2);
-        spectrumHeader.setBounds (rc.removeFromBottom (16));
-        rc.removeFromBottom (8);
-    }
-    else
-    {
-        spectrumHeader.setBounds ({});
-        spectrum.setBounds ({});
-    }
-
-    if (xyScope.isVisible())
-    {
-        if (rc.getHeight() >= xySectionHeight)
-        {
-            xyScope.setBounds (rc.removeFromBottom (xySize));
-            rc.removeFromBottom (2);
-            xyHeader.setBounds (rc.removeFromBottom (16));
-            rc.removeFromBottom (8);
-        }
-        else
-        {
-            xyHeader.setBounds ({});
-            xyScope.setBounds ({});
-        }
+        button->setBounds (rc.removeFromLeft (16));
+        rc.removeFromLeft (2);
     }
 }

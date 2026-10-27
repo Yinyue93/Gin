@@ -63,6 +63,8 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <gin_plugin/gin_plugin.h>
+#include "standaloneplugin/gin_sidebarlayout.h"
+#include "standaloneplugin/gin_midifileexporter.h"
 
 namespace gin
 {

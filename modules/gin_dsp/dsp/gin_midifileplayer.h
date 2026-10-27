@@ -124,11 +124,16 @@ public:
     */
     juce::AudioPlayHead::PositionInfo populatePositionInfo();
 
+    /** Converts between the sequence's tick timestamps and seconds, following
+        the file's tempo map. Call from the message or audio thread, not while
+        a file is loading.
+    */
+    double ticksToSeconds (double ticks) const;
+    double secondsToTicks (double seconds) const;
+
 private:
     void buildSequence();
     void buildTempoMap();
-    double ticksToSeconds (double ticks) const;
-    double secondsToTicks (double seconds) const;
     void performSeek (double positionInSeconds, juce::MidiBuffer& midiBuffer);
     void sendAllNotesOff (juce::MidiBuffer& midiBuffer, int samplePosition);
 

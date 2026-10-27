@@ -35,10 +35,43 @@ void MidiFileComponent::timerCallback()
             onPlaybackStateChanged();
     }
 
-    if (isPlaying || wasPlaying != isPlaying)
+    // A seek lands on the audio thread a block later, so while stopped watch
+    // for the position to move rather than repainting right after the click
+    const double position = midiPlayer.getPlayheadPosition();
+    const bool moved = position != lastPosition;
+    lastPosition = position;
+
+    if (moved && ! isPlaying && onPlaybackStateChanged)
+        onPlaybackStateChanged();
+
+    if (isPlaying || wasPlaying != isPlaying || moved)
         repaint();
 
     wasPlaying = isPlaying;
+}
+
+void MidiFileComponent::mouseDown (const juce::MouseEvent& e)
+{
+    seekTo (e.position.x);
+}
+
+void MidiFileComponent::mouseDrag (const juce::MouseEvent& e)
+{
+    seekTo (e.position.x);
+}
+
+void MidiFileComponent::seekTo (float x)
+{
+    const double lengthInTicks = midiPlayer.getLengthInTicks();
+    if (! midiPlayer.hasFileLoaded() || lengthInTicks <= 0.0 || getWidth() <= 0)
+        return;
+
+    // The notes are laid out in ticks, so map the click through the tempo map
+    // to land on exactly the note under the mouse
+    const double proportion = juce::jlimit (0.0, 1.0, double (x) / getWidth());
+    const double seconds = midiPlayer.ticksToSeconds (proportion * lengthInTicks);
+
+    midiPlayer.setPlayheadPosition (juce::jlimit (0.0, midiPlayer.getLengthInSeconds(), seconds));
 }
 
 bool MidiFileComponent::isInterestedInFileDrag (const juce::StringArray& files)
@@ -141,10 +174,12 @@ void MidiFileComponent::paint (juce::Graphics& g)
             }
         }
 
-        // Draw playhead (playhead position is in seconds)
+        // Draw playhead (playhead position is in seconds, converted to ticks
+        // so it lines up with the notes when the tempo changes)
         if (midiPlayer.isPlaying() || midiPlayer.getPlayheadPosition() > 0.0)
         {
-            const float playheadX = static_cast<float> (midiPlayer.getPlayheadPosition() / lengthInSeconds) * w;
+            const double playheadTicks = midiPlayer.secondsToTicks (midiPlayer.getPlayheadPosition());
+            const float playheadX = static_cast<float> (playheadTicks / lengthInTicks) * w;
 
             g.setColour (juce::Colours::black.withAlpha (0.5f));
             g.fillRect (playheadX - 0.5f, 0.0f, 3.0f, h);

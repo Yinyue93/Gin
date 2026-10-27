@@ -54,6 +54,10 @@ public:
     void paint (juce::Graphics& g) override;
     void timerCallback() override;
 
+    // Clicking or dragging moves the playhead to that point
+    void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;
+
     // FileDragAndDropTarget
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray& files, int x, int y) override;
@@ -67,9 +71,12 @@ public:
     std::function<void()> onPlaybackStateChanged;
 
 private:
+    void seekTo (float x);
+
     MidiFilePlayer& midiPlayer;
     bool isDragOver = false;
     bool wasPlaying = false;
+    double lastPosition = 0.0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MidiFileComponent)
 };
