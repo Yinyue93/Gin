@@ -173,7 +173,8 @@ private:
 //==============================================================================
 class SideBarComponent : public juce::Component,
                          public juce::Timer,
-                         public juce::ChangeListener
+                         public juce::ChangeListener,
+                         public juce::KeyListener
 {
 public:
     SideBarComponent (StandaloneFilterWindow& filterWindow);
@@ -183,6 +184,8 @@ public:
     void paint (juce::Graphics& g) override;
     void timerCallback() override;
     void changeListenerCallback (juce::ChangeBroadcaster* source) override;
+    using juce::Component::keyPressed;
+    bool keyPressed (const juce::KeyPress& key, juce::Component* originatingComponent) override;
 
     void updateComponentVisibility();
 
@@ -193,6 +196,7 @@ private:
     void saveMidiFilePath();
     void restoreMidiFilePath();
     void showMidiMenu();
+    void browseForMidiFile();
     void showExportDialog();
     void exportMidiFile (const juce::File& wavFile, bool normalize);
     void addToMidiMRU (const juce::File& file);
@@ -222,6 +226,7 @@ private:
     SVGButton           midiStop;
     SVGButton           midiMenu;
     SVGButton           midiExport;
+    std::unique_ptr<juce::FileChooser> midiChooser;
 
     class ExportJob;
     std::unique_ptr<ExportJob> exportJob;

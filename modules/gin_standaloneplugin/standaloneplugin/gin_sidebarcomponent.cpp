@@ -327,6 +327,9 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
     // Listen for audio device changes
     filterWindow.getDeviceManager().addChangeListener (this);
 
+    // Keys the focused component doesn't use bubble up to the window
+    filterWindow.addKeyListener (this);
+
     // Reparent the controls without changing their individual visibility.
     while (getNumChildComponents() > 0)
         content.addChildComponent (getChildComponent (0));
@@ -339,9 +342,34 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
 SideBarComponent::~SideBarComponent()
 {
     filterWindow.getDeviceManager().removeChangeListener (this);
+    filterWindow.removeKeyListener (this);
 
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+bool SideBarComponent::keyPressed (const juce::KeyPress& key, juce::Component*)
+{
+    if (! filterWindow.pluginHolder->processor->acceptsMidi())
+        return false;
+
+    if (key == juce::KeyPress ('o', juce::ModifierKeys::commandModifier, 0))
+    {
+        browseForMidiFile();
+        return true;
+    }
+
+    if (key == juce::KeyPress (juce::KeyPress::spaceKey))
+    {
+        if (player.midiPlayer.isPlaying())
+            midiStop.triggerClick();
+        else if (player.midiPlayer.hasFileLoaded())
+            midiPlay.triggerClick();
+
+        return true;
+    }
+
+    return false;
 }
 
 void SideBarComponent::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -584,6 +612,44 @@ juce::StringArray SideBarComponent::getMidiMRU()
     return mru;
 }
 
+void SideBarComponent::browseForMidiFile()
+{
+    if (midiChooser != nullptr)
+        return;
+
+    auto folder = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    if (auto* props = filterWindow.pluginHolder->settings.get())
+    {
+        juce::File lastDir (props->getValue ("midiLastDirectory", ""));
+        if (lastDir.isDirectory())
+            folder = lastDir;
+    }
+
+    midiChooser = std::make_unique<juce::FileChooser> ("Load MIDI File", folder, "*.mid;*.midi");
+
+    auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+    midiChooser->launchAsync (flags, [this] (const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        midiChooser.reset();
+
+        if (! file.existsAsFile())
+            return;
+
+        if (auto* props = filterWindow.pluginHolder->settings.get())
+            props->setValue ("midiLastDirectory", file.getParentDirectory().getFullPathName());
+
+        if (player.midiPlayer.load (file))
+        {
+            addToMidiMRU (file);
+            saveMidiFilePath();
+            updatePlayStopButtons();
+            midi.repaint();
+        }
+    });
+}
+
 void SideBarComponent::showMidiMenu()
 {
     juce::PopupMenu menu;
@@ -599,25 +665,7 @@ void SideBarComponent::showMidiMenu()
 
     menu.addSeparator();
 
-    menu.addItem ("Load File...", [this]
-    {
-        auto fc = std::make_shared<juce::FileChooser> ("Load MIDI File",
-            juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
-            "*.mid;*.midi");
-
-        auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
-        fc->launchAsync (flags, [this, fc] (const juce::FileChooser&)
-        {
-            auto file = fc->getResult();
-            if (file.existsAsFile() && player.midiPlayer.load (file))
-            {
-                addToMidiMRU (file);
-                saveMidiFilePath();
-                updatePlayStopButtons();
-                midi.repaint();
-            }
-        });
-    });
+    menu.addItem ("Load File...", [this] { browseForMidiFile(); });
 
     menu.addItem ("Clear File", player.midiPlayer.hasFileLoaded(), false, [this]
     {
