@@ -120,6 +120,12 @@ SideBarComponent::SideBarComponent (StandaloneFilterWindow& f)
         midiExport.onClick = [this] { showExportDialog(); };
         addAndMakeVisible (midiExport);
 
+        midiFileName.setFont (juce::FontOptions (11.0f));
+        midiFileName.setColour (juce::Label::textColourId, findColour (GinLookAndFeel::whiteColourId));
+        midiFileName.setMinimumHorizontalScale (1.0f);
+        midiFileName.setBorderSize ({});
+        addAndMakeVisible (midiFileName);
+
         // Restore loop setting
         if (auto* props = filterWindow.pluginHolder->settings.get())
             player.midiPlayer.setLooping (props->getBoolValue ("midiLoop", true));
@@ -417,6 +423,10 @@ void SideBarComponent::updatePlayStopButtons()
     midiPlay.setEnabled (! isPlaying && player.midiPlayer.hasFileLoaded());
     midiStop.setEnabled (isPlaying || player.midiPlayer.getPlayheadPosition() > 0.0);
     midiExport.setEnabled (player.midiPlayer.hasFileLoaded() && exportJob == nullptr);
+
+    const auto file = player.midiPlayer.hasFileLoaded() ? player.midiPlayer.getLoadedFile() : juce::File();
+    midiFileName.setText (file.getFileNameWithoutExtension(), juce::dontSendNotification);
+    midiFileName.setTooltip (file.getFullPathName());
 }
 
 void SideBarComponent::showExportDialog()
@@ -956,9 +966,12 @@ void SideBarComponent::resized()
             rc.removeFromLeft (2);
             extra->setBounds (rc.removeFromLeft (16));
         }
+
+        return rc;
     };
 
-    playerSection (layout.midi, midiHeader, midi, midiPlay, midiStop, midiMenu, &midiExport);
+    auto midiRow = playerSection (layout.midi, midiHeader, midi, midiPlay, midiStop, midiMenu, &midiExport);
+    midiFileName.setBounds (midiRow.withTrimmedLeft (4).withHeight (16));
     playerSection (layout.sample, sampleHeader, sample, samplePlay, sampleStop, sampleMenu);
 
     auto graphSection = [] (juce::Rectangle<int> rc, juce::Component& header, juce::Component& display)

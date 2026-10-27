@@ -226,6 +226,7 @@ private:
     SVGButton           midiStop;
     SVGButton           midiMenu;
     SVGButton           midiExport;
+    juce::Label         midiFileName;
     std::unique_ptr<juce::FileChooser> midiChooser;
 
     class ExportJob;
